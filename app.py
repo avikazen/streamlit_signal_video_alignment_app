@@ -141,7 +141,8 @@ def plot_signal_window(axis_data: dict[str, tuple[np.ndarray, np.ndarray]], cent
     ax.set_ylabel("Standardized accel")
     ax.set_title("Sensor window around selected frame")
     ax.legend()
-    fig.tight_layout()
+    fig.tight_layout(pad=5)
+    fig.subplots_adjust(left=0.06, right=0.98, top=0.9, bottom=0.18)
     return fig
 
 
@@ -156,11 +157,16 @@ def plot_full_trace(axis_data: dict[str, tuple[np.ndarray, np.ndarray]], primary
             delta = primary_times[peaks[idx]] - primary_times[peaks[idx - 1]]
             ax.text(
                 primary_times[peaks[idx]],
-                primary_signal[peaks[idx]] + 0.5,
+                primary_signal[peaks[idx]] + 0.8,
                 f"Δ {delta:.2f}s",
                 fontsize=8,
                 ha="center",
             )
+        try:
+            max_peak = float(np.nanmax(primary_signal))
+        except ValueError:
+            max_peak = 0.0
+        ax.set_ylim(top=max_peak * 1.5)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Standardized accel")
     ax.set_title("Full accelerometer recording with detected peaks")
@@ -178,10 +184,8 @@ def main() -> None:
         """
     )
 
-    with st.sidebar:
-        st.header("Inputs & controls")
-        video_upload = st.file_uploader("Video file", type=["mov", "mp4", "avi"], key="video_upload")
-        sensor_upload = st.file_uploader("Accelerometer data", type=["xls", "xlsx", "csv", "txt"], key="sensor_upload")
+    video_upload = st.file_uploader("Video file", type=["mov", "mp4", "avi"], key="video_upload")
+    sensor_upload = st.file_uploader("Accelerometer data", type=["xls", "xlsx", "csv", "txt"], key="sensor_upload")
 
     if video_upload is not None:
         video_path = save_uploaded_file(video_upload)
@@ -197,9 +201,11 @@ def main() -> None:
         sensor_path = DEFAULT_SENSOR if DEFAULT_SENSOR.exists() else None
         sensor_source = DEFAULT_SENSOR.name if sensor_path else "(none)"
 
-    st.sidebar.divider()
-    st.sidebar.markdown(f"**Video:** {video_source}")
-    st.sidebar.markdown(f"**Sensor:** {sensor_source}")
+    st.divider()
+    st.subheader("Session info")
+    video_col, sensor_col = st.columns(2)
+    video_col.markdown(f"**Video:** {video_source}")
+    sensor_col.markdown(f"**Sensor:** {sensor_source}")
 
     if video_path is None or sensor_path is None:
         st.warning("Upload video and data files.")
@@ -223,8 +229,11 @@ def main() -> None:
 
     axis_options = list(axis_signals.keys())
     default_axis = "Y" if "Y" in axis_options else axis_options[0]
-    if "axis_picker" not in st.session_state:
-        st.session_state.axis_picker = [default_axis]
+    axis_selection_key = "axis_selection"
+    cached_axis = st.session_state.get(axis_selection_key)
+    if cached_axis not in axis_options:
+        cached_axis = default_axis
+        st.session_state[axis_selection_key] = cached_axis
     axes_info = ", ".join(f"{axis}: {axis_columns[axis]}" for axis in axis_options if axis in axis_columns)
 
     _, duration = get_video_metadata(video_path)
@@ -239,14 +248,49 @@ def main() -> None:
         with frame_col:
             st.subheader("Video frame")
             image_placeholder = st.empty()
-            video_time = st.slider(
-                "Video time (s)",
-                min_value=0.0,
-                max_value=float(duration),
-                value=video_time,
-                step=0.1,
-                key="video_time_slider",
-            )
+            def adjust_video_time(delta: float) -> None:
+                slider_key = "video_time_slider"
+                current = st.session_state.get(slider_key, video_time)
+                new_value = round(min(max(current + delta, 0.0), float(duration)), 2)
+                st.session_state[slider_key] = new_value
+
+            control_cols = st.columns([1, 1])
+            with control_cols[0]:
+                video_time = st.slider(
+                    "Video time (s)",
+                    min_value=0.0,
+                    max_value=float(duration),
+                    value=video_time,
+                    step=0.1,
+                    key="video_time_slider",
+                )
+            with control_cols[1]:
+                st.markdown(
+                    """
+                    <div style="display: flex; gap: 8px;">
+                        <div style="flex: 1;"></div>
+                        <div style="flex: 1;"></div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+                button_cols = st.columns([1, 1])
+                with button_cols[0]:
+                    st.button(
+                        "-0.1 s",
+                        key="video_time_decrease",
+                        use_container_width=True,
+                        on_click=adjust_video_time,
+                        kwargs={"delta": -0.1},
+                    )
+                with button_cols[1]:
+                    st.button(
+                        "+0.1 s",
+                        key="video_time_increase",
+                        use_container_width=True,
+                        on_click=adjust_video_time,
+                        kwargs={"delta": 0.1},
+                    )
             frame = read_video_frame(video_path, video_time)
             if frame is not None:
                 frame = crop_frame_vertically(frame, target_ratio=2.0)
@@ -255,12 +299,13 @@ def main() -> None:
                 image_placeholder.info("Frame not available at selected time.")
         with signal_col:
             st.subheader("Sensor window")
-            selected_axes = st.multiselect(
-                "Select axes to display", axis_options, default=st.session_state.axis_picker, key="axis_picker"
+            selected_axis = st.radio(
+                "Select axis to display",
+                axis_options,
+                index=axis_options.index(cached_axis),
+                key=axis_selection_key,
+                horizontal=True,
             )
-            if not selected_axes:
-                st.warning("Select at least one axis to display.")
-                return
 
             if "offset_input" not in st.session_state:
                 st.session_state.offset_input = f"{default_offset:.2f}"
@@ -276,7 +321,7 @@ def main() -> None:
             window_width = st.session_state.window_slider
 
             sensor_time = video_time - offset
-            selected_axis_data = {axis: axis_signals[axis] for axis in selected_axes}
+            selected_axis_data = {selected_axis: axis_signals[selected_axis]}
             snippet_fig = plot_signal_window(selected_axis_data, sensor_time, window_width)
             st.pyplot(snippet_fig)
 
@@ -288,7 +333,7 @@ def main() -> None:
                 new_value = round(current + delta, 2)
                 st.session_state.offset_input = f"{new_value:.2f}"
 
-            label_col, input_col, dec_col, inc_col = st.columns([1.5, 1.2, 0.6, 0.6])
+            label_col, input_col, dec_col, inc_col = st.columns([1.5, 1, 1, 1])
             with label_col:
                 st.write("Signal offset (s)")
             with input_col:
@@ -310,9 +355,9 @@ def main() -> None:
                     kwargs={"delta": 0.1},
                 )
 
-            width_label_col, width_slider_col = st.columns([1.2, 2])
+            width_label_col, width_slider_col = st.columns([1.5, 3])
             with width_label_col:
-                st.write("Sensor window width (s)")
+                st.write("Window width (s)")
             with width_slider_col:
                 st.slider(
                     "",
@@ -324,11 +369,11 @@ def main() -> None:
                     label_visibility="collapsed",
                 )
 
-    selected_axes = st.session_state.axis_picker
-    if not selected_axes:
+    selected_axis = st.session_state.get(axis_selection_key)
+    if not selected_axis:
         return
-    selected_axis_data = {axis: axis_signals[axis] for axis in selected_axes}
-    primary_axis = selected_axes[0]
+    selected_axis_data = {selected_axis: axis_signals[selected_axis]}
+    primary_axis = selected_axis
     primary_times, primary_signal = selected_axis_data[primary_axis]
     fs = calc_samplerate(primary_times)
     peaks = detect_peaks(primary_signal, fs)
